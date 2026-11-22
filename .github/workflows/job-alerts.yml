@@ -1,10 +1,12 @@
 name: job-alerts
 
-# Runs 24/7: every run keeps checking for ~28 minutes, and a new run is
-# queued every 20 minutes, so one always picks up where the last ended.
+# Runs 24/7. Each run checks every few minutes for ~50 minutes, then starts
+# the next run itself (GitHub's scheduler alone is too unreliable). The
+# hourly schedule is only a backup in case the chain ever breaks.
+# To stop the bot: Actions → job-alerts → "..." → Disable workflow.
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch: {}
   push:  # restart with new code/settings as soon as they're pushed
     branches: [main]
@@ -16,11 +18,12 @@ concurrency:
 
 permissions:
   contents: write  # to save state/seen.json back to the repo
+  actions: write   # to start the next run
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +38,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python job_alerts.py --loop 28
+        run: python job_alerts.py --loop 50
 
       - name: Save seen jobs
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           git config user.name "job-alerts-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -47,3 +50,9 @@ jobs:
           git commit -m "chore: update seen jobs"
           for i in 1 2 3; do git pull --rebase -X theirs && git push && exit 0; sleep 5; done
           exit 1
+
+      - name: Start next run
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run job-alerts.yml --ref main
