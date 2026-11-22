@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: "*/20 * * * *"
   workflow_dispatch: {}
+  push:  # restart with new code/settings as soon as they're pushed
+    branches: [main]
+    paths: ["job_alerts.py", "config.py", "requirements.txt", ".github/workflows/**"]
 
 concurrency:
   group: job-alerts
