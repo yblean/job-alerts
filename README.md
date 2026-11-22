@@ -22,6 +22,19 @@ Graduate Software Engineer 🎓
 View & apply →
 ```
 
+### Tracking what you've applied to
+
+Each alert has **✅ Applied** and **🙈 Not interested** buttons. After you
+apply, it offers **🗣 Got interview** and **↩️ Undo**. In the bot chat:
+
+- `/jobs`: checklist of every job you were alerted to (last 30 days). Tap a job to tick it off as applied, and tap again to untick it.
+- `/todo`: only the jobs you haven't applied to yet.
+- `/applied`: everything you've applied to.
+
+Buttons respond within seconds while the bot is running. Only your own
+chat (`TELEGRAM_CHAT_ID`) can use them. Don't run the bot on your PC
+and on GitHub at the same time, or they'll fight over button taps.
+
 ---
 
 ## Setup (about 10 minutes)
