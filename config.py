@@ -165,6 +165,20 @@ GRAD_TITLE = (
 INCLUDE_INTERNSHIPS = False
 INTERN_TITLE = r"\bintern\b|internship|\bco-?op\b|attachment|placement"
 
+# ─────────────────── Experience check (job description) ───────────
+# Before alerting, the bot reads the full job description and finds the
+# years of experience it asks for ("3+ years", "minimum 2 years", ...).
+# Jobs asking for more than this are dropped, unless the description says
+# fresh grads are welcome. 1 keeps "0-2 yrs" and "1-3 yrs" roles.
+MAX_YEARS_EXPERIENCE = 1
+
+# Jobs whose description doesn't state any experience requirement and
+# doesn't mention fresh grads / entry level. False = skip them (strict).
+ALERT_WHEN_EXPERIENCE_UNCLEAR = False
+
+# Max job descriptions to read per check (the rest wait for the next check).
+MAX_DESCRIPTIONS_PER_CHECK = 60
+
 # ─────────────────────────── Alerts ──────────────────────────────
 MAX_ALERTS_PER_CHECK = 25  # anything beyond is summarised in one message
 

@@ -8,7 +8,12 @@ new (or reposted) fresh-grad tech job in Singapore appears on:
 - **54 company career pages** with Singapore offices (Stripe, OpenAI, Airwallex, Binance, OKX, Databricks, Jane Street, Palantir, …). Companies often post here *before* LinkedIn.
 
 Titles are filtered to tech roles, and senior, lead, manager, sales and intern
-roles are dropped. Each job is alerted once; the same job found on another
+roles are dropped. The bot then **reads each job's full description** and
+only alerts you if the experience it asks for is at most 1 year
+(`MAX_YEARS_EXPERIENCE`), or if it says fresh grads are welcome. Jobs that
+don't state any experience requirement are skipped too
+(`ALERT_WHEN_EXPERIENCE_UNCLEAR`). Each alert shows what it found, e.g.
+"📋 Needs 1 yr experience" or "📋 Fresh grads welcome". Each job is alerted once; the same job found on another
 site is skipped. Explicit grad roles get a 🎓, and reposts are marked 🔁.
 
 Example alert:

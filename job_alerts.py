@@ -31,6 +31,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config as C
+import experience as E
 
 for _stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252: no emoji
     try:
@@ -72,6 +73,8 @@ class Job:
     posted_text: str = ""  # human-readable, e.g. "12 minutes ago"
     posted_key: str = ""   # comparable posting date, used to spot reposts
     extra: str = ""        # e.g. salary
+    desc: str = ""         # job description text, when the listing includes it
+    verdict: object = None  # experience.Verdict once the description was read
 
     @property
     def source(self):
@@ -237,8 +240,11 @@ def fetch_board(board):
             cats = j.get("categories") or {}
             locs = [cats.get("location", "")] + list(cats.get("allLocations") or [])
             if in_sg(*locs):
+                desc = "\n".join([j.get("descriptionPlain") or ""]
+                                 + [f"{l.get('text', '')}\n{html_to_text(l.get('content', ''))}" for l in j.get("lists") or []]
+                                 + [j.get("additionalPlain") or ""])
                 jobs.append(Job(feed, j["id"], j.get("text", ""), name,
-                                cats.get("location", ""), j.get("hostedUrl", "")))
+                                cats.get("location", ""), j.get("hostedUrl", ""), desc=desc))
     elif platform == "ashby":
         r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{token}", timeout=30)
         r.raise_for_status()
@@ -248,10 +254,76 @@ def fetch_board(board):
             locs = [j.get("location", "")] + [s.get("location", "") for s in j.get("secondaryLocations") or []]
             if in_sg(*locs):
                 jobs.append(Job(feed, j["id"], j.get("title", ""), name,
-                                j.get("location", ""), j.get("jobUrl", "")))
+                                j.get("location", ""), j.get("jobUrl", ""),
+                                desc=j.get("descriptionPlain") or html_to_text(j.get("descriptionHtml", ""))))
     else:
         raise ValueError(f"unknown platform {platform}")
     return jobs
+
+
+# ─────────────────── Job descriptions & experience check ───────────────────
+
+def html_to_text(s):
+    return BeautifulSoup(s or "", "html.parser").get_text("\n", strip=True)
+
+
+def fetch_description(source, feed, job_id, url):
+    """Full description text for one job, or None if it couldn't be fetched."""
+    if source == "linkedin":
+        for attempt in range(3):
+            try:
+                r = SESSION.get(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}", timeout=25)
+                if r.status_code == 200:
+                    el = BeautifulSoup(r.text, "html.parser").select_one(
+                        ".show-more-less-html__markup, .description__text")
+                    return el.get_text("\n", strip=True) if el else ""
+                if r.status_code in (404, 410):
+                    return ""  # taken down
+            except requests.RequestException:
+                pass
+            time.sleep(8 * (attempt + 1) + random.uniform(0, 3))
+        return None
+    try:
+        if source == "mcf":
+            r = SESSION.get(f"https://api.mycareersfuture.gov.sg/v2/jobs/{job_id}", timeout=25)
+            r.raise_for_status()
+            j = r.json()
+            text = html_to_text(j.get("description", ""))
+            if j.get("minimumYearsExperience") is not None:  # employer-filled field
+                text += f"\nMinimum {j['minimumYearsExperience']} years of experience."
+            return text
+        if source == "greenhouse":
+            token = feed.split(":", 1)[1]
+            r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs/{job_id}", timeout=25)
+            r.raise_for_status()
+            return html_to_text(html.unescape(r.json().get("content", "")))
+    except (requests.RequestException, ValueError):
+        return None
+    return None
+
+
+def assess_jobs(jobs):
+    """Reads the descriptions of `jobs` and sets job.verdict (left None if unreadable)."""
+    def one(job):
+        if job.source in ("lever", "ashby"):  # description came with the listing
+            text = job.desc
+        else:
+            text = fetch_description(job.source, job.feed, job.id, job.url)
+        if text is not None:
+            job.verdict = E.assess(text, job.title)
+
+    linkedin = [j for j in jobs if j.source == "linkedin"]
+    others = [j for j in jobs if j.source != "linkedin"]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        others_done = pool.map(one, others)
+        for job in linkedin:  # one at a time, politely
+            one(job)
+            time.sleep(random.uniform(1, 2))
+        list(others_done)
+
+
+def verdict_passes(v):
+    return v.ok is True or (v.ok is None and C.ALERT_WHEN_EXPERIENCE_UNCLEAR)
 
 
 # ─────────────────────────── Telegram ───────────────────────────
@@ -346,8 +418,12 @@ def fmt_alert(rec):
         lines.append(f"🕒 {e(rec['posted'])}")
     if rec.get("extra"):
         lines.append(f"💰 {e(rec['extra'])}")
+    if rec.get("exp"):
+        lines.append(f"📋 {e(rec['exp'])}")
     lines.append(f'<a href="{e(rec["url"], quote=True)}">View &amp; apply →</a>')
-    if rec.get("status"):
+    if rec.get("removed"):
+        lines.append(f"\n🚫 <b>{e(rec['removed'])}</b>: removed from your /jobs checklist")
+    elif rec.get("status"):
         lines.append(f"\n<b>{STATUS_LABEL[rec['status']]}</b> · {fmt_date(rec['status_at'])}")
     return "\n".join(lines)
 
@@ -365,7 +441,7 @@ def alert_buttons(sid, status):
 def checklist_items(state, todo_only):
     cutoff = time.time() - CHECKLIST_DAYS * 86400
     items = [(sid, r) for sid, r in state["tracked"].items()
-             if r["alerted"] >= cutoff and r["status"] != "skipped"
+             if r["alerted"] >= cutoff and r["status"] != "skipped" and not r.get("removed")
              and (not todo_only or not r["status"])]
     return sorted(items, key=lambda x: -x[1]["alerted"])
 
@@ -564,8 +640,65 @@ def run_check(state, tg):
     if li_ok:
         feeds_ok.add("linkedin")
 
+    # Read the descriptions of jobs that could become alerts (new, tech title,
+    # from a source we're already watching) to check the experience required.
+    seeded = set(state["seeded"])
+    candidates, seen = [], set()
+    for job in all_jobs:
+        if (job.uid in seen or job.feed not in seeded or job.uid in state["jobs"]
+                or not title_ok(job.title)):
+            continue
+        seen.add(job.uid)
+        candidates.append(job)
+    assess_jobs(candidates[:C.MAX_DESCRIPTIONS_PER_CHECK])
+
+    # Also re-check a few jobs alerted before this check existed.
+    backfill = backfill_jobs(state)
+    assess_jobs([job for _, job in backfill])
+
     with STATE_LOCK:
+        apply_backfill(state, tg, backfill)
         return process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0)
+
+
+BACKFILL_PER_CHECK = 15
+
+
+def backfill_jobs(state):
+    """(short id, Job) for already-alerted jobs whose experience wasn't checked yet."""
+    out = []
+    for sid, r in list(state["tracked"].items()):
+        if "exp" in r:
+            continue
+        url, src = r["url"], r["source"]
+        m = (re.search(r"/jobs/view/(\d+)", url) if src == "linkedin"
+             else re.search(r"([0-9a-f]{32})/?$", url) if src == "mcf"
+             else re.search(r"greenhouse\.io/([^/?]+)/jobs/(\d+)", url) if src == "greenhouse"
+             else None)
+        if not m:
+            r["exp"] = ""  # can't re-read this one; leave it as is
+            continue
+        feed, job_id = (f"greenhouse:{m.group(1)}", m.group(2)) if src == "greenhouse" else (src, m.group(1))
+        out.append((sid, Job(feed, job_id, r["title"], r["company"], r.get("location", ""), url)))
+        if len(out) >= BACKFILL_PER_CHECK:
+            break
+    return out
+
+
+def apply_backfill(state, tg, backfill):
+    removed = 0
+    for sid, job in backfill:
+        r = state["tracked"].get(sid)
+        if r is None or job.verdict is None:
+            continue  # gone, or couldn't read it: try again next check
+        r["exp"] = job.verdict.label
+        if not r["status"] and not verdict_passes(job.verdict):
+            r["removed"] = job.verdict.label
+            removed += 1
+        if r.get("msg"):
+            tg.edit(r["msg"], fmt_alert(r), [] if r.get("removed") else alert_buttons(sid, r["status"]))
+    if backfill:
+        log(f"  re-checked {len(backfill)} earlier alerts, removed {removed} from the checklist")
 
 
 def process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0):
@@ -587,7 +720,7 @@ def process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0):
     seeded = set(state["seeded"])
     alerts = []  # (job, kind, title_key, previous_title_seen)
     seen_this_check = set()
-    kept = 0
+    kept = too_senior = unread = 0
     for job in all_jobs:
         if job.uid in seen_this_check or not title_ok(job.title):
             continue
@@ -608,12 +741,22 @@ def process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0):
             rec["last"] = now
             if job.posted_key:
                 rec["posted"] = max(job.posted_key, rec.get("posted") or "")
-            if repost and not silent:
+            if repost and not silent and not rec.get("rej"):
                 rec["alerted"] = now
                 alerts.append((job, "repost", None, None))
             continue
 
         prev = state["titles"].get(tkey)
+        if not silent:
+            if job.verdict is None:
+                unread += 1
+                continue  # description not read yet: not recorded, so retried next check
+            if not verdict_passes(job.verdict):
+                # Needs too much experience: remember it so it's never alerted.
+                state["jobs"][job.uid] = {"first": now, "last": now, "alerted": 0,
+                                          "posted": job.posted_key, "rej": job.verdict.label}
+                too_senior += 1
+                continue
         state["jobs"][job.uid] = {"first": now, "last": now, "alerted": now, "posted": job.posted_key}
         state["titles"].setdefault(tkey, now)
         if silent:
@@ -631,6 +774,7 @@ def process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0):
         rec = {"title": job.title, "company": job.company, "location": job.location,
                "posted": job.posted_text, "extra": job.extra, "url": job.url,
                "source": job.source, "kind": kind, "alerted": now,
+               "exp": job.verdict.label if job.verdict else old.get("exp", ""),
                "status": old.get("status", ""), "status_at": old.get("status_at", 0), "msg": None}
         if i >= C.MAX_ALERTS_PER_CHECK:
             state["tracked"][sid] = rec  # no message of its own, but it's in /jobs
@@ -653,6 +797,7 @@ def process_jobs(state, tg, all_jobs, feeds_ok, li_ok, li_failed, t0):
     newly_seeded = feeds_ok - seeded
     state["seeded"] = sorted(seeded | feeds_ok)
     log(f"check done in {time.time() - t0:.0f}s: {len(all_jobs)} jobs fetched, {kept} match filters, "
+        f"{too_senior} skipped for experience, {unread} descriptions left for next check, "
         f"{sent} alerts sent | LinkedIn {li_ok} ok / {li_failed} failed | "
         f"{len(feeds_ok)} sources ok" + (f" | {len(newly_seeded)} new sources recorded silently" if newly_seeded else ""))
     return newly_seeded, kept
